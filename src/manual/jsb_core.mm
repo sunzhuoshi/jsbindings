@@ -52,7 +52,7 @@ static tHashJSObject *reverse_hash = NULL;
 // Globals
 char * JSB_association_proxy_key = NULL;
 
-const char * JSB_version = "JSB v0.6";
+const char * JSB_version = "JSB v0.8";
 
 
 static void its_finalize(JSFreeOp *fop, JSObject *obj)
@@ -72,9 +72,14 @@ static JSClass global_class = {
 #pragma mark JSBCore - Helper free functions
 static void reportError(JSContext *cx, const char *message, JSErrorReport *report)
 {
-	fprintf(stderr, "%s:%u:%s\n",
-			report->filename ? report->filename : "<no filename=\"filename\">",
-			(unsigned int) report->lineno,
+	js_DumpBacktrace(cx);
+#if DEBUG
+//	js_DumpStackFrame(cx);
+#endif
+	fprintf(stdout, "%s:%u:%u %s\n",
+			report->filename ? report->filename : "(no filename)",
+			(unsigned int)report->lineno,
+			(unsigned int)report->column,
 			message);
 };
 
@@ -87,7 +92,7 @@ JSBool JSB_core_log(JSContext *cx, uint32_t argc, jsval *vp)
 		JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &string);
 		if (string) {
 			char *cstr = JS_EncodeString(cx, string);
-			fprintf(stderr, "%s\n", cstr);
+			fprintf(stdout, "%s\n", cstr);
 		}
 
 		return JS_TRUE;
@@ -239,10 +244,10 @@ JSBool JSB_core_removeRootJS(JSContext *cx, uint32_t argc, jsval *vp)
 /*
  * Dumps GC
  */
-static void dumpNamedRoot(const char *name, void *addr,  JSGCRootType type, void *data)
-{
-    printf("There is a root named '%s' at %p\n", name, addr);
-}
+//static void dumpNamedRoot(const char *name, void *addr,  JSGCRootType type, void *data)
+//{
+//    printf("There is a root named '%s' at %p\n", name, addr);
+//}
 
 JSBool JSB_core_dumpRoot(JSContext *cx, uint32_t argc, jsval *vp)
 {
@@ -250,7 +255,7 @@ JSBool JSB_core_dumpRoot(JSContext *cx, uint32_t argc, jsval *vp)
 	// Mac and Simulator versions were compiled with DEBUG.
 #if DEBUG && (defined(__CC_PLATFORM_MAC) || TARGET_IPHONE_SIMULATOR )
 //	JSRuntime *rt = [[JSBCore sharedInstance] runtime];
-//	JS_DumpNamedRoots(rt, dumpNamedRoot, NULL);
+//	JS_DumpNamedRoots(rt, dumpNamedRoot, NULL);eff
 
 //	JSRuntime *rt = [[JSBCore sharedInstance] runtime];
 //	JS_DumpHeap(rt, stdout, NULL, JSTRACE_OBJECT, NULL, 2, NULL);
@@ -301,7 +306,11 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 
 #if DEBUG
 		printf("JavaScript Bindings - %s\n", JSB_version);
-#endif
+
+#if JSB_ENABLE_DEBUGGER
+		printf("Debugger enabled. Listening on port: %d\n", JSB_DEBUGGER_PORT);
+#endif //JSB_ENABLE_DEBUGGER
+#endif // DEBUG
 
 		// Must be called only once, and before creating a new runtime
 		// XXX: Removed in SpiderMonkey 19.0
@@ -313,16 +322,39 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 	return self;
 }
 
+JSPrincipals shellTrustedPrincipals = { 1 };
+
+JSBool
+CheckObjectAccess(JSContext *cx, js::HandleObject obj, js::HandleId id, JSAccessMode mode,
+                  js::MutableHandleValue vp)
+{
+    return true;
+}
+
+JSSecurityCallbacks securityCallbacks = {
+    CheckObjectAccess,
+    NULL
+};
+
 -(void) createRuntime
 {
 	NSAssert(_rt == NULL && _cx==NULL, @"runtime already created. Reset it first");
 
-	_rt = JS_NewRuntime(8 * 1024 * 1024, JS_NO_HELPER_THREADS);
+	_rt = JS_NewRuntime(32L * 1024L * 1024L, JS_USE_HELPER_THREADS);
+    JS_SetGCParameter(_rt, JSGC_MAX_BYTES, 0xffffffff);
+	
+    JS_SetTrustedPrincipals(_rt, &shellTrustedPrincipals);
+    JS_SetSecurityCallbacks(_rt, &securityCallbacks);
+	JS_SetNativeStackQuota(_rt, JSB_MAX_STACK_QUOTA);
 	_cx = JS_NewContext( _rt, 8192);
 	JS_SetVersion(_cx, JSVERSION_LATEST);
 	JS_SetOptions(_cx, JSOPTION_VAROBJFIX | JSOPTION_TYPE_INFERENCE);
 	JS_SetErrorReporter(_cx, reportError);
-	_object = JSB_NewGlobalObject(_cx, false);
+	_object = new js::RootedObject(_cx, JSB_NewGlobalObject(_cx, false));
+#if JSB_ENABLE_DEBUGGER
+	JS_SetDebugMode(_cx, JS_TRUE);
+	[self enableDebugger];
+#endif
 }
 
 +(void) reportErrorWithContext:(JSContext*)cx message:(NSString*)message report:(JSErrorReport*)report
@@ -399,7 +431,7 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 		outVal = &rval;
 	}
 	const char *cstr = [string UTF8String];
-	ok = JS_EvaluateScript( _cx, _object, cstr, (unsigned)strlen(cstr), filename, lineno, outVal);
+	ok = JS_EvaluateScript( _cx, _object->get(), cstr, (unsigned)strlen(cstr), filename, lineno, outVal);
 	if (ok == JS_FALSE) {
 		CCLOGWARN(@"error evaluating script:%@", string);
 	}
@@ -408,56 +440,78 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 }
 
 /*
- * Evaluates an script
- */
--(JSBool) runScript_do_not_use:(NSString*)filename
-{
-	JSBool ok = JS_FALSE;
-
-	CCFileUtils *fileUtils = [CCFileUtils sharedFileUtils];
-	NSString *fullpath = [fileUtils fullPathForFilenameIgnoringResolutions:filename];
-
-	unsigned char *content = NULL;
-	size_t contentSize = ccLoadFileIntoMemory([fullpath UTF8String], &content);
-	if (content && contentSize) {
-		jsval rval;
-		ok = JS_EvaluateScript( _cx, _object, (char *)content, (unsigned)contentSize, [filename UTF8String], 1, &rval);
-		free(content);
-
-		if (ok == JS_FALSE)
-			CCLOGWARN(@"error evaluating script: %@", filename);
-	}
-
-	return ok;
-}
-
-/*
  * This function works OK if it JS_SetCStringsAreUTF8() is called.
  */
 -(JSBool) runScript:(NSString*)filename
 {
-	return [self runScript:filename withContainer:_object];
+	return [self runScript:filename withContainer:_object->get()];
 }
 
--(JSBool) runScript:(NSString*)filename withContainer:(JSObject *)global
+- (JSBool)runScript:(NSString*)filename withContainer:(JSObject *)global
 {
 	JSBool ok = JS_FALSE;
+	NSString *fullpathJSC = nil, *fullpathJS = nil;
+	NSString *filenameJSC = nil;
+	JSScript *script = NULL;
 
 	CCFileUtils *fileUtils = [CCFileUtils sharedFileUtils];
-	NSString *fullpath = [fileUtils fullPathForFilenameIgnoringResolutions:filename];
-	if( !fullpath) {
+
+	// a) check for .js on specified directory, and get .jsc filename
+	fullpathJS = [fileUtils fullPathForFilenameIgnoringResolutions:filename];
+	filenameJSC = [[filename stringByDeletingPathExtension] stringByAppendingPathExtension:@"jsc"];
+
+	// b) No .js ? Check for .jsc on specified directory ?
+	if( ! fullpathJS)
+		fullpathJSC = [fileUtils fullPathForFilenameIgnoringResolutions:filenameJSC];
+
+	// c) No .js and no .jsc ? -> error
+	if( !fullpathJS && ! fullpathJSC) {
 		char tmp[256];
-		snprintf(tmp, sizeof(tmp)-1, "File not found: %s", [filename UTF8String]);
-		JSB_PRECONDITION(fullpath, tmp);
+		snprintf(tmp, sizeof(tmp)-1, "File not found: %s", [fullpathJS UTF8String]);
+		JSB_PRECONDITION(fullpathJS || fullpathJSC, tmp);
 	}
 
-	// Removed in SpiderMonkey 19.0
-	//	JSScript* script = JS_CompileUTF8File(_cx, global, [fullpath UTF8String] );
+	// d) if .jsc on specified directory, get its script
+	if( fullpathJSC)
+		script = [self decodeScript:fullpathJSC];
+
+#if	JSB_ENABLE_JSC_AUTOGENERATION
+	else {
+		// e) if not .jsc on specified directory, check for .jsc on cache directory
+		NSString *cachedFullpathJSC = [self cachedFullpathForJSC:filenameJSC];
+
+		// f) if .jsc on cache is newer than .js, execute cached file
+		if( cachedFullpathJSC ) {
+			NSFileManager *fileManager = [NSFileManager defaultManager];
+			NSDictionary* attrs = [fileManager attributesOfItemAtPath:cachedFullpathJSC error:nil];
+			NSDate *jscDate = [attrs fileCreationDate];
+
+			// .js date
+			NSDictionary* jsAttrs = [fileManager attributesOfItemAtPath:fullpathJS error:nil];
+			NSDate *jsDate = [jsAttrs fileCreationDate];
+
+			if( [jscDate compare:jsDate] == NSOrderedDescending) {
+
+				script = [self decodeScript:cachedFullpathJSC];
+			}
+		}
+	}
+#endif // JSB_ENABLE_JSC_AUTOGENERATION
+
 
 	js::RootedObject obj(_cx, global);
-	JS::CompileOptions options(_cx);
-	options.setUTF8(true).setFileAndLine([fullpath UTF8String], 1);
-	JSScript *script = JS::Compile(_cx, obj, options, [fullpath UTF8String]);
+
+	// g) Failed to get encoded scripts ? Then execute .js file and create .jsc on cache
+	if( ! script ) {
+		JS::CompileOptions options(_cx);
+		options.setUTF8(true)
+				.setFileAndLine([fullpathJS UTF8String], 1);
+		script = JS::Compile(_cx, obj, options, [fullpathJS UTF8String]);
+
+#if JSB_ENABLE_JSC_AUTOGENERATION
+		[self encodeScript:script filename:filenameJSC];
+#endif // JSB_ENABLE_JSC_AUTOGENERATION
+	}
 
 	JSB_PRECONDITION(script, "Error compiling script");
 	{
@@ -465,7 +519,14 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 		jsval result;
 		ok = JS_ExecuteScript(_cx, obj, script, &result);
 	}
+	if (!ok) {
+		char tmp[256];
+		snprintf(tmp, sizeof(tmp)-1, "Error executing script: %s", [filename UTF8String]);
+		JSB_PRECONDITION(ok, tmp);
+	}
 
+
+	// XXX: is this needed ?
 	// add script to the global map
 	const char* key = [filename UTF8String];
 	if (__scripts[key]) {
@@ -476,14 +537,60 @@ JSBool JSB_core_restartVM(JSContext *cx, uint32_t argc, jsval *vp)
 	js::RootedScript* rootedScript = new js::RootedScript(_cx, script);
 	__scripts[key] = rootedScript;
 
-	JSB_PRECONDITION(ok, "Error executing script");
-
     return ok;
+}
+
+- (NSString*) cachedFullpathForJSC:(NSString*)filename
+{
+	NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+	NSString *documentsDirectory = [paths objectAtIndex:0];
+
+	NSString *fullpath = [NSString stringWithFormat:@"%@/%@", documentsDirectory, filename];
+	if( [[NSFileManager defaultManager] fileExistsAtPath:fullpath] )
+		return fullpath;
+	return nil;
+}
+
+- (JSScript*)decodeScript:(NSString*)filename
+{
+	NSData *data = [NSData dataWithContentsOfFile:filename];
+	JSB_PRECONDITION(data, "Error running encoded script");
+
+	return JS_DecodeScript(_cx, [data bytes], [data length], NULL, NULL);
+}
+
+-(void) encodeScript:(JSScript *)script filename:(NSString*)filename
+{
+	uint32_t len;
+	void *bytes = JS_EncodeScript(_cx, script, &len);
+
+	NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+	NSString *documentsDirectory = [paths objectAtIndex:0];
+
+	NSString *fullpath = [NSString stringWithFormat:@"%@/%@", documentsDirectory, filename];
+
+	// create directory
+	NSError *error = nil;
+	NSString *p = [fullpath stringByDeletingLastPathComponent];
+	[[NSFileManager defaultManager] createDirectoryAtPath:p
+							  withIntermediateDirectories:YES
+											   attributes:nil
+													error:&error];
+
+	NSData *data = [NSData dataWithBytes:bytes length:len];
+	[data writeToFile:fullpath atomically:NO];
 }
 
 -(void) dealloc
 {
 	[super dealloc];
+
+	if (_object) {
+		delete _object;
+	}
+	if (_debugObject) {
+		delete _debugObject;
+	}
 
 	JS_DestroyContext(_cx);
 	JS_DestroyRuntime(_rt);
@@ -620,62 +727,67 @@ void JSB_set_c_proxy_for_jsobject( JSObject *jsobj, void *handle, unsigned long 
 JSObject* JSB_NewGlobalObject(JSContext* cx, bool empty)
 {
 	JSObject* glob = JS_NewGlobalObject(cx, &global_class, NULL);
-	if (!glob) {
-		return NULL;
-	}
-	JSB_ENSURE_AUTOCOMPARTMENT(cx, glob);
-	JSBool ok = JS_TRUE;
-	ok = JS_InitStandardClasses(cx, glob);
-	if (ok)
-		JS_InitReflect(cx, glob);
-	if (ok)
-		ok = JS_DefineDebuggerObject(cx, glob);
-	if (!ok)
+	if (!glob)
 		return NULL;
 
-	if (empty)
-		return glob;
-
-	//
-	// globals
-	//
-	JS_DefineFunction(cx, glob, "require", JSB_core_executeScript, 1, JSPROP_READONLY | JSPROP_PERMANENT);
-	JS_DefineFunction(cx, glob, "__associateObjWithNative", JSB_core_associateObjectWithNative, 2, JSPROP_READONLY | JSPROP_PERMANENT);
-	JS_DefineFunction(cx, glob, "__getAssociatedNative", JSB_core_getAssociatedNative, 2, JSPROP_READONLY | JSPROP_PERMANENT);
-	JS_DefineFunction(cx, glob, "__getPlatform", JSB_core_platform, 0, JSPROP_READONLY | JSPROP_PERMANENT);
-	JS_DefineFunction(cx, glob, "__getOS", JSB_core_os, 0, JSPROP_READONLY | JSPROP_PERMANENT);
-	JS_DefineFunction(cx, glob, "__getVersion", JSB_core_version, 0, JSPROP_READONLY | JSPROP_PERMANENT);
-
-	JS_DefineFunction(cx, glob, "__garbageCollect", JSB_core_forceGC, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
-	JS_DefineFunction(cx, glob, "__dumpRoot", JSB_core_dumpRoot, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
-	JS_DefineFunction(cx, glob, "__executeScript", JSB_core_executeScript, 1, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
-	JS_DefineFunction(cx, glob, "__restartVM", JSB_core_restartVM, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
-
-	//
-	// 3rd party developer ?
-	// Add here your own classes registration
-	//
-
-	// registers cocos2d, cocosdenshion and cocosbuilder reader bindings
+	{
+		JSB_ENSURE_AUTOCOMPARTMENT(cx, glob);
+		JSBool ok = JS_TRUE;
+		ok = JS_InitStandardClasses(cx, glob);
+		if (ok)
+			JS_InitReflect(cx, glob);
+		if (ok)
+			ok = JS_DefineDebuggerObject(cx, glob);
+		if (!ok)
+			return NULL;
+		
+		if (empty) {
+			JS_WrapObject(cx, &glob);
+			return glob;
+		}
+		
+		//
+		// globals
+		//
+		JS_DefineFunction(cx, glob, "require", JSB_core_executeScript, 1, JSPROP_READONLY | JSPROP_PERMANENT);
+		JS_DefineFunction(cx, glob, "__associateObjWithNative", JSB_core_associateObjectWithNative, 2, JSPROP_READONLY | JSPROP_PERMANENT);
+		JS_DefineFunction(cx, glob, "__getAssociatedNative", JSB_core_getAssociatedNative, 2, JSPROP_READONLY | JSPROP_PERMANENT);
+		JS_DefineFunction(cx, glob, "__getPlatform", JSB_core_platform, 0, JSPROP_READONLY | JSPROP_PERMANENT);
+		JS_DefineFunction(cx, glob, "__getOS", JSB_core_os, 0, JSPROP_READONLY | JSPROP_PERMANENT);
+		JS_DefineFunction(cx, glob, "__getVersion", JSB_core_version, 0, JSPROP_READONLY | JSPROP_PERMANENT);
+		
+		JS_DefineFunction(cx, glob, "__garbageCollect", JSB_core_forceGC, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
+		JS_DefineFunction(cx, glob, "__dumpRoot", JSB_core_dumpRoot, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
+		JS_DefineFunction(cx, glob, "__executeScript", JSB_core_executeScript, 1, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
+		JS_DefineFunction(cx, glob, "__restartVM", JSB_core_restartVM, 0, JSPROP_READONLY | JSPROP_PERMANENT | JSPROP_ENUMERATE );
+		
+		//
+		// 3rd party developer ?
+		// Add here your own classes registration
+		//
+		
+		// registers cocos2d, cocosdenshion and cocosbuilder reader bindings
 #if JSB_INCLUDE_COCOS2D
-	JSB_register_cocos2d(cx, glob);
+		JSB_register_cocos2d(cx, glob);
 #endif // JSB_INCLUDE_COCOS2D
-
-	// registers chipmunk bindings
+		
+		// registers chipmunk bindings
 #if JSB_INCLUDE_CHIPMUNK
-	JSB_register_chipmunk(cx, glob);
+		JSB_register_chipmunk(cx, glob);
 #endif // JSB_INCLUDE_CHIPMUNK
-
-	// registers sys bindings
+		
+		// registers sys bindings
 #if JSB_INCLUDE_SYSTEM
-	JSB_register_system(cx, glob);
+		JSB_register_system(cx, glob);
 #endif // JSB_INCLUDE_SYSTEM
-
-	// registers opengl bindings
+		
+		// registers opengl bindings
 #if JSB_INCLUDE_OPENGL
-	JSB_register_opengl(cx, glob);
+		JSB_register_opengl(cx, glob);
 #endif // JSB_INCLUDE_OPENGL
-
+		
+	}
+	JS_WrapObject(cx, &glob);
     return glob;
 }
 

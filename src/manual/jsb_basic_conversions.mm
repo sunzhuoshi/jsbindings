@@ -230,7 +230,7 @@ JSBool JSB_jsval_to_NSSet( JSContext *cx, jsval vp, NSSet** ret)
 
 	uint32_t len;
 	JS_GetArrayLength(cx, jsobj,&len);
-	NSMutableSet *set = [NSMutableArray arrayWithCapacity:len];
+	NSMutableArray *array = [NSMutableArray arrayWithCapacity:len];
 	for( uint32_t i=0; i< len;i++ ) {		
 		jsval valarg;
 		JS_GetElement(cx, jsobj, i, &valarg);
@@ -240,9 +240,9 @@ JSBool JSB_jsval_to_NSSet( JSContext *cx, jsval vp, NSSet** ret)
 		ok = JSB_jsval_is_NSObject( cx, valarg, &real_obj );
 		JSB_PRECONDITION2( ok, cx, JS_FALSE, "Error converting value to nsobject");
 		
-		[set addObject:real_obj];
+		[array addObject:real_obj];
 	}
-	*ret = set;
+	*ret = [NSSet setWithArray:array];;
 	return JS_TRUE;
 }
 
@@ -277,8 +277,13 @@ JSBool JSB_jsval_to_unknown(JSContext *cx, jsval vp, id* ret)
 	else if (JSVAL_IS_STRING(vp)) {
 		return JSB_jsval_to_NSString( cx, vp, ret );
 	}
-	// Null or undefined
-	else if (JSVAL_IS_NULL(vp) || JSVAL_IS_VOID(vp)) {
+	// Null
+	else if (JSVAL_IS_NULL(vp)) {
+		*ret = [NSNull null];
+		return JS_TRUE;
+	}
+	// undefined
+	else if (JSVAL_IS_VOID(vp)) {
 		*ret = NULL;
 		return JS_TRUE;
 	}
@@ -325,16 +330,22 @@ JSBool JSB_jsvals_variadic_to_NSArray( JSContext *cx, jsval *vp, int argc, NSArr
 
 JSBool JSB_jsval_to_block_1( JSContext *cx, jsval vp, JSObject *jsthis, js_block *ret)
 {
+	// special case: jsval is null
+	if( JSVAL_IS_NULL(vp) ) {
+		*ret = NULL;
+		return JS_TRUE;
+	}
+
 	JSFunction *func = JS_ValueToFunction(cx, vp );
 	JSB_PRECONDITION2( func, cx, JS_FALSE, "Error converting value to function");
-	
-	js_block block = ^(id sender) {
 
+	JSB_Callback *cb = JSB_prepare_callback(cx, jsthis, vp);
+	js_block block = ^(id sender) {
 		jsval rval;
-		jsval val = JSB_jsval_from_NSObject(cx, sender);
+		jsval val = JSB_jsval_from_unknown(cx, sender);
 
 		JSB_ENSURE_AUTOCOMPARTMENT(cx, jsthis);
-		JSBool ok = JS_CallFunctionValue(cx, jsthis, vp, 1, &val, &rval);
+		JSBool ok = JSB_execute_callback(cb, 1, &val, &rval);
 		JSB_PRECONDITION2(ok, cx, , "Error calling callback (1)");
 	};
 	
@@ -747,13 +758,22 @@ jsval JSB_jsval_from_NSObject( JSContext *cx, id obj )
 
 jsval JSB_jsval_from_NSNumber( JSContext *cx, NSNumber *number)
 {
-	double ret_obj = [number floatValue];
+	double ret_obj = [number doubleValue];
 	return DOUBLE_TO_JSVAL(ret_obj);
 }
 
 jsval JSB_jsval_from_NSString( JSContext *cx, NSString *str)
 {
-	JSString *ret_obj = JS_NewStringCopyZ(cx, [str UTF8String]);
+	if( ! str )
+		return JSVAL_NULL;
+	
+	size_t len = str.length;
+	
+	jschar *chars = (jschar *)malloc((len + 1) * sizeof(jschar));
+	chars[len] = 0;
+	[str getCharacters:chars range:NSMakeRange(0, len)];
+	
+	JSString *ret_obj = JS_NewUCString(cx, chars, len);
 	return STRING_TO_JSVAL(ret_obj);
 }
 
@@ -771,12 +791,23 @@ jsval JSB_jsval_from_NSArray( JSContext *cx, NSArray *array)
 
 jsval JSB_jsval_from_NSDictionary( JSContext *cx, NSDictionary *dict)
 {
+	if (!dict) {
+		return JSVAL_NULL;
+	}
+
 	__block JSObject *jsobj = JS_NewObject(cx, NULL, NULL, NULL);
 	
 	[dict enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-		NSString *k = (NSString*)key;
-		jsval val = JSB_jsval_from_unknown(cx, obj);
-		JS_DefineProperty(cx, jsobj, [k UTF8String], val, NULL, NULL, JSPROP_ENUMERATE | JSPROP_PERMANENT);
+		const char *k = NULL;
+        	if([key isKindOfClass:[NSString class]]) {
+           		k = [(NSString*)key UTF8String];
+        	} else if([key isKindOfClass:[NSNumber class]]) {
+            		k = [[(NSNumber*)key stringValue] UTF8String];
+        	} 
+        	if(k) {
+			jsval val = JSB_jsval_from_unknown(cx, obj);
+			JS_DefineProperty(cx, jsobj, k, val, NULL, NULL, JSPROP_ENUMERATE | JSPROP_PERMANENT);
+        	}
 		*stop = NO;
 	}];
 
@@ -917,3 +948,77 @@ jsval JSB_jsval_from_charptr( JSContext *cx, const char *str)
 	return STRING_TO_JSVAL(ret_obj);
 }
 
+jsval JSB_jsval_from_struct( JSContext *cx, GLsizei count, void *data, JSArrayBufferViewType t)
+{
+	JSObject *typedArray;
+	switch (t) {
+		case js::ArrayBufferView::TYPE_INT8:
+			typedArray = JS_NewInt8Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_UINT8:
+			typedArray = JS_NewUint8Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_INT16:
+			typedArray = JS_NewInt16Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_UINT16:
+			typedArray = JS_NewUint16Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_INT32:
+			typedArray = JS_NewInt32Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_UINT32:
+			typedArray = JS_NewUint32Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_FLOAT32:
+			typedArray = JS_NewFloat32Array(cx, count);
+			break;
+		case js::ArrayBufferView::TYPE_FLOAT64:
+			typedArray = JS_NewFloat64Array(cx, count);
+			break;
+		default:
+			JSB_PRECONDITION2(NO, cx, JSVAL_NULL, "Unsupported typedarray type");
+			break;
+	}
+	
+	memcpy(JS_GetArrayBufferViewData(typedArray), data, JS_GetArrayBufferViewByteLength(typedArray));
+	return OBJECT_TO_JSVAL(typedArray);
+}
+
+JSB_Callback* JSB_prepare_callback( JSContext *cx, JSObject *jsthis, jsval funcval)
+{
+	return [[[JSB_Callback alloc] initWithContext:cx funcval:funcval jsthis:jsthis] autorelease];
+}
+
+JSBool JSB_execute_callback( JSB_Callback *cb, unsigned argc, jsval *argv, jsval *rval)
+{
+	JSContext *cx = cb.cx;
+	JSObject *jsthis = cb.jsthis;
+	jsval funcval = cb.funcval;
+
+	return JS_CallFunctionValue(cx, jsthis, funcval, argc, argv, rval);
+}
+
+@implementation JSB_Callback
+
+- (id) initWithContext:(JSContext *)cx funcval:(jsval)funcval jsthis:(JSObject*)jsthis
+{
+	if (self = [super init]) {
+		_cx = cx;
+		_funcval = funcval;
+		_jsthis = jsthis;
+
+		JS_AddValueRoot(cx, &_funcval);
+		JS_AddObjectRoot(cx, &_jsthis);
+	}
+	return self;
+}
+
+- (void) dealloc
+{
+	JS_RemoveValueRoot(_cx, &_funcval);
+	JS_RemoveObjectRoot(_cx, &_jsthis);
+	[super dealloc];
+}
+
+@end

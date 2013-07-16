@@ -115,6 +115,20 @@ void JSB_GLNode_finalize(JSFreeOp *fop, JSObject *obj)
 	JSB_del_proxy_for_jsobject( obj );
 }
 
+// 'ctor' method. Needed for subclassing native objects in JS
+JSBool JSB_GLNode_ctor(JSContext *cx, uint32_t argc, jsval *vp) {
+
+	JSObject* obj = (JSObject *)JS_THIS_OBJECT(cx, vp);
+	JSB_PRECONDITION2( !JSB_get_proxy_for_jsobject(obj), cx, JS_FALSE, "Object already initialzied. error" );
+
+	JSB_GLNode *proxy = [[JSB_GLNode alloc] initWithJSObject:obj class:[GLNode class]];
+	[[proxy class] swizzleMethods];
+
+	JS_SET_RVAL(cx, vp, JSVAL_TRUE);
+
+	return JS_TRUE;
+}
+
 // Arguments:
 // Ret value: GLNode* (o)
 JSBool JSB_GLNode_node_static(JSContext *cx, uint32_t argc, jsval *vp) {
@@ -143,6 +157,7 @@ void JSB_GLNode_createClass(JSContext *cx, JSObject* globalObj, const char* name
 		{0, 0, 0, 0, 0}
 	};
 	static JSFunctionSpec funcs[] = {
+		JS_FN("ctor", JSB_GLNode_ctor, 0, JSPROP_PERMANENT | JSPROP_ENUMERATE),
 		JS_FS_END
 	};
 	static JSFunctionSpec st_funcs[] = {
@@ -317,6 +332,262 @@ JSBool JSB_jsval_to_array_of_CGPoint( JSContext *cx, jsval vp, CGPoint**points, 
 	return JS_TRUE;
 }
 
+ccColor3B getColorFromJSObject(JSContext *cx, JSObject *colorObject)
+{
+    jsval jsr;
+    ccColor3B out;
+    JS_GetProperty(cx, colorObject, "r", &jsr);
+    double fontR = 0.0;
+    JS_ValueToNumber(cx, jsr, &fontR);
+    
+    JS_GetProperty(cx, colorObject, "g", &jsr);
+    double fontG = 0.0;
+    JS_ValueToNumber(cx, jsr, &fontG);
+    
+    JS_GetProperty(cx, colorObject, "b", &jsr);
+    double fontB = 0.0;
+    JS_ValueToNumber(cx, jsr, &fontB);
+    
+    // the out
+    out.r = (unsigned char)fontR;
+    out.g = (unsigned char)fontG;
+    out.b = (unsigned char)fontB;
+    
+    return out;
+}
+
+CGSize getSizeFromJSObject(JSContext *cx, JSObject *sizeObject)
+{
+    jsval jsr;
+    CGSize out;
+    JS_GetProperty(cx, sizeObject, "width", &jsr);
+    double width = 0.0;
+    JS_ValueToNumber(cx, jsr, &width);
+    
+    JS_GetProperty(cx, sizeObject, "height", &jsr);
+    double height = 0.0;
+    JS_ValueToNumber(cx, jsr, &height);
+    
+    
+    // the out
+    out.width  = width;
+    out.height = height;
+    
+    return out;
+}
+
+JSBool JSB_jsval_to_CCFontDefinition( JSContext *cx, jsval vp, CCFontDefinition **out )
+{
+    JSObject *jsobj;
+    
+	if( ! JS_ValueToObject( cx, vp, &jsobj ) )
+		return JS_FALSE;
+	
+	JSB_PRECONDITION( jsobj, "Not a valid JS object");
+    
+    // defaul values
+    const char *            defautlFontName         = "Arial";
+    const int               defaultFontSize         = 32;
+    CCTextAlignment         defaultTextAlignment    = kCCTextAlignmentLeft;
+    CCVerticalTextAlignment defaultTextVAlignment   = kCCVerticalTextAlignmentTop;
+    
+    CCFontDefinition *ret = [[[CCFontDefinition alloc] init] autorelease];
+    // by default shadow and stroke are off
+    [ret enableShadow: false];
+    [ret enableStroke: false];
+    
+    
+    // white text by default
+    ret.fontFillColor = ccWHITE;
+    
+    // font name
+    jsval jsr;
+    const jschar *chars = 0;
+    size_t l            = 0;
+    
+    JS_GetProperty(cx, jsobj, "fontName", &jsr);
+    JSString *jsstr = JS_ValueToString( cx, jsr );
+	
+    if( jsstr )
+    {
+        chars   = JS_GetStringCharsZ(cx, jsstr);
+        l       = JS_GetStringLength(jsstr);
+    }
+	
+    if ( (!chars) || (l<=0))
+    {
+        ret.fontName = [NSString stringWithUTF8String:defautlFontName];
+    }
+    else
+    {
+        ret.fontName = [NSString stringWithCharacters:chars length:l];
+    }
+    
+    // font size
+    JSBool hasProperty;
+    JS_HasProperty(cx, jsobj, "fontSize", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "fontSize", &jsr);
+        double fontSize = 0.0;
+        JS_ValueToNumber(cx, jsr, &fontSize);
+        ret.fontSize  = fontSize;
+    }
+    else
+    {
+        ret.fontSize = defaultFontSize;
+    }
+    
+    // font alignment horizontal
+    JS_HasProperty(cx, jsobj, "fontAlignmentH", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "fontAlignmentH", &jsr);
+        double fontAlign = 0.0;
+        JS_ValueToNumber(cx, jsr, &fontAlign);
+        ret.alignment  = (CCTextAlignment)fontAlign;
+    }
+    else
+    {
+        ret.alignment  = defaultTextAlignment;
+    }
+    
+    // font alignment vertical
+    JS_HasProperty(cx, jsobj, "fontAlignmentV", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "fontAlignmentV", &jsr);
+        double fontAlign = 0.0;
+        JS_ValueToNumber(cx, jsr, &fontAlign);
+        ret.vertAlignment = (CCVerticalTextAlignment)fontAlign;
+    }
+    else
+    {
+        ret.vertAlignment  = defaultTextVAlignment;
+    }
+    
+    // font fill color
+    JS_HasProperty(cx, jsobj, "fontFillColor", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "fontFillColor", &jsr);
+        
+        JSObject *jsobjColor;
+        if( ! JS_ValueToObject( cx, jsr, &jsobjColor ) )
+            return JS_FALSE;
+        
+        ret.fontFillColor = getColorFromJSObject(cx, jsobjColor);
+    }
+    
+    // font rendering box dimensions
+    JS_HasProperty(cx, jsobj, "fontDimensions", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "fontDimensions", &jsr);
+        
+        JSObject *jsobjSize;
+        if( ! JS_ValueToObject( cx, jsr, &jsobjSize ) )
+            return JS_FALSE;
+        
+        ret.dimensions = getSizeFromJSObject(cx, jsobjSize);
+    }
+    
+    // shadow
+    JS_HasProperty(cx, jsobj, "shadowEnabled", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "shadowEnabled", &jsr);
+        [ret enableShadow: ToBoolean(jsr)];
+        
+        if( [ret shadowEnabled] )
+        {
+            // default shadow values
+            CGSize shadowOffet;
+            shadowOffet.width  = 5;
+            shadowOffet.height = 5;
+            
+            [ret setShadowOffset:shadowOffet];
+            [ret setShadowBlur:1.0f];
+            
+            
+            // shado offset
+            JS_HasProperty(cx, jsobj, "shadowOffset", &hasProperty);
+            if ( hasProperty )
+            {
+                JS_GetProperty(cx, jsobj, "shadowOffset", &jsr);
+                
+                JSObject *jsobjShadowOffset;
+                if( ! JS_ValueToObject( cx, jsr, &jsobjShadowOffset ) )
+                    return JS_FALSE;
+                
+                [ret setShadowOffset: getSizeFromJSObject(cx, jsobjShadowOffset)];
+            }
+            
+            // shadow blur
+            JS_HasProperty(cx, jsobj, "shadowBlur", &hasProperty);
+            if ( hasProperty )
+            {
+                JS_GetProperty(cx, jsobj, "shadowBlur", &jsr);
+                double shadowBlur = 0.0;
+                JS_ValueToNumber(cx, jsr, &shadowBlur);
+                [ret setShadowBlur: shadowBlur];
+            }
+            
+            // shadow intensity
+            /* not supported yet
+            JS_HasProperty(cx, jsobj, "shadowOpacity", &hasProperty);
+            if ( hasProperty )
+            {
+                JS_GetProperty(cx, jsobj, "shadowOpacity", &jsr);
+                double shadowOpacity = 0.0;
+                JS_ValueToNumber(cx, jsr, &shadowOpacity);
+            }
+            */
+        }
+    }
+    
+    // stroke
+    JS_HasProperty(cx, jsobj, "strokeEnabled", &hasProperty);
+    if ( hasProperty )
+    {
+        JS_GetProperty(cx, jsobj, "strokeEnabled", &jsr);
+        [ret enableStroke:ToBoolean(jsr)];
+        
+        if( [ret strokeEnabled] )
+        {
+            // default stroke values
+            [ret setStrokeSize: 1];
+            [ret setStrokeColor: ccBLUE];
+            
+            // stroke color
+            JS_HasProperty(cx, jsobj, "strokeColor", &hasProperty);
+            if ( hasProperty )
+            {
+                JS_GetProperty(cx, jsobj, "strokeColor", &jsr);
+                
+                JSObject *jsobjStrokeColor;
+                if( ! JS_ValueToObject( cx, jsr, &jsobjStrokeColor ) )
+                    return JS_FALSE;
+                [ret setStrokeColor:getColorFromJSObject(cx, jsobjStrokeColor)];
+            }
+            
+            // stroke size
+            JS_HasProperty(cx, jsobj, "strokeSize", &hasProperty);
+            if ( hasProperty )
+            {
+                JS_GetProperty(cx, jsobj, "strokeSize", &jsr);
+                double strokeSize = 0.0;
+                JS_ValueToNumber(cx, jsr, &strokeSize);
+                [ret setStrokeSize: strokeSize];
+            }
+        }
+    }
+    
+    *out = ret;
+    // we are done here
+	return JS_TRUE;
+}
+
 #pragma mark - Layer
 
 @implementation JSB_CCLayer (Manual)
@@ -441,7 +712,8 @@ JSBool JSB_CCMenuItem_setBlock_( JSContext *cx, uint32_t argc, jsval *vp ) {
 	JSB_PRECONDITION( argc==1 || argc==2, "Invalid number of arguments. Expecting 1 or 2 args" );
 	jsval *argvp = JS_ARGV(cx,vp);
 	js_block js_func;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	JSBool ok = JS_TRUE;
 
 	if(argc==2) {
@@ -473,8 +745,9 @@ JSBool JSB_CCMenuItemFont_itemWithString_block__static(JSContext *cx, uint32_t a
 	JSBool ok = JS_TRUE;
 	NSString *normal;
 	js_block js_func;
-	JSObject *js_this = NULL;
-	
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
+
 	ok &= JSB_jsval_to_NSString( cx, argvp[0], &normal );
 		
 	if( argc >= 2 ) {
@@ -526,8 +799,9 @@ JSBool JSB_CCMenuItemFont_initWithString_block_(JSContext *cx, uint32_t argc, js
 	JSBool ok = JS_TRUE;
 	NSString *normal;
 	js_block js_func;
-	JSObject *js_this = NULL;
-	
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
+
 	ok &= JSB_jsval_to_NSString( cx, argvp[0], &normal );
 	
 	if( argc >= 2 ) {
@@ -569,8 +843,9 @@ JSBool JSB_CCMenuItemLabel_itemWithLabel_block__static(JSContext *cx, uint32_t a
 	JSBool ok = JS_TRUE;
 	CCNode<CCLabelProtocol, CCRGBAProtocol> *label;
 	js_block js_func;
-	JSObject *js_this = NULL;
-	
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
+
 	ok &= JSB_jsval_to_NSObject( cx, argvp[0], &label );
 	
 	if( argc >= 2 ) {
@@ -618,8 +893,9 @@ JSBool JSB_CCMenuItemLabel_initWithLabel_block_(JSContext *cx, uint32_t argc, js
 	JSBool ok = JS_TRUE;
 	CCNode<CCLabelProtocol, CCRGBAProtocol> *label;
 	js_block js_func;
-	JSObject *js_this = NULL;
-	
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
+
 	ok &= JSB_jsval_to_NSObject( cx, argvp[0], &label );
 	
 	if( argc >= 2 ) {
@@ -659,7 +935,8 @@ JSBool JSB_CCMenuItemImage_itemWithNormalImage_selectedImage_disabledImage_block
 	NSString *normal, *selected, *disabled;
 	js_block js_func;
 	jsval valthis, valfn;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	JSBool lastArgIsCallback = JS_FALSE;
 	
 	// 1st: Check if "this" is present
@@ -731,7 +1008,8 @@ JSBool JSB_CCMenuItemImage_initWithNormalImage_selectedImage_disabledImage_block
 	NSString *normal, *selected, *disabled;
 	jsval valthis, valfn;
 	js_block js_func;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	JSBool lastArgIsCallback = JS_FALSE;
 
 	
@@ -800,7 +1078,8 @@ JSBool JSB_CCMenuItemSprite_itemWithNormalSprite_selectedSprite_disabledSprite_b
 	CCSprite *normal, *selected, *disabled;
 	js_block js_func;
 	jsval valthis, valfn;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	JSBool lastArgIsCallback = JS_FALSE;
 	
 	// 1st: Check if "this" is present
@@ -870,7 +1149,8 @@ JSBool JSB_CCMenuItemSprite_initWithNormalSprite_selectedSprite_disabledSprite_b
 	CCSprite *normal, *selected, *disabled;
 	js_block js_func;
 	jsval valthis, valfn;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	JSBool lastArgIsCallback = JS_FALSE;
 	
 	// 1st: Check if "this" is present
@@ -932,7 +1212,8 @@ JSBool JSB_CCCallBlockN_actionWithBlock__static(JSContext *cx, uint32_t argc, js
 	jsval *argvp = JS_ARGV(cx,vp);
 	JSBool ok = JS_TRUE;
 	js_block js_func;
-	JSObject *js_this = NULL;
+	// default value for js_this. Can't use NULL.
+	JSObject *js_this = (JSObject *)JS_THIS_OBJECT(cx, vp);
 	jsval valthis, valfn;
 	
 	NSObject *ret_val;
@@ -1311,13 +1592,14 @@ JSBool JSB_CCScheduler_scheduleBlockForKey_target_interval_repeat_delay_paused_b
 		key = [NSString stringWithFormat:@"anonfunc at %p", func];
 	}
 
+	JSB_Callback *cb = JSB_prepare_callback(cx, jstarget, funcval);
 	void (^block)(ccTime dt) = ^(ccTime dt) {
 
 		jsval rval;
 		jsval jsdt = DOUBLE_TO_JSVAL(dt);
 
 		JSB_ENSURE_AUTOCOMPARTMENT(cx, jstarget);
-		JSBool ok = JS_CallFunctionValue(cx, jstarget, funcval, 1, &jsdt, &rval);
+		JSBool ok = JSB_execute_callback(cb, 1, &jsdt, &rval);
 		JSB_PRECONDITION2(ok, cx, ,"Error calling collision callback: schedule_interval_repeat_delay");
 	};
 

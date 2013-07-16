@@ -42,8 +42,8 @@ extern char * JSB_association_proxy_key;
 {
 	JSRuntime	*_rt;
 	JSContext	*_cx;
-	JSObject	*_object;
-	JSObject    *_debugObject;
+	js::RootedObject* _object;
+	js::RootedObject* _debugObject;
 }
 
 /** return the global context */
@@ -53,10 +53,10 @@ extern char * JSB_association_proxy_key;
 @property (nonatomic, readonly) JSContext* globalContext;
 
 /** return the global container */
-@property (nonatomic, readonly) JSObject* globalObject;
+@property (nonatomic, readonly) js::RootedObject* globalObject;
 
 /** return the debug container */
-@property (nonatomic, readonly) JSObject* debugObject;
+@property (nonatomic, readonly) js::RootedObject* debugObject;
 
 /** returns the shared instance */
 +(JSBCore*) sharedInstance;
@@ -135,6 +135,12 @@ extern char * JSB_association_proxy_key;
  * @param global The path of the script to be run
  */
 -(JSBool) runScript:(NSString*)filename withContainer:(JSObject *)global;
+
+-(JSScript*) decodeScript:(NSString*)filename;
+
+-(void) encodeScript:(JSScript *)script filename:(NSString*)filename;
+
+-(NSString*) cachedFullpathForJSC:(NSString*)path;
 
 @end
 
